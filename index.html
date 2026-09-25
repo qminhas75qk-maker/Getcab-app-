@@ -247,6 +247,27 @@
   }
   .followform .chkrow{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text-dim);}
 
+  /* ---------- Scripts library ---------- */
+  .scriptcard{border-bottom:1px solid var(--border); padding:13px 14px;}
+  .scriptcard:last-child{border-bottom:none;}
+  .scriptcard .stopic{font-weight:700; font-size:13.5px; color:var(--teal); margin-bottom:6px;}
+  .scriptcard .sbody{
+    white-space:pre-wrap; font-size:13px; line-height:1.55; color:var(--text);
+    background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:10px 11px; margin-bottom:8px;
+  }
+  .scriptcard .sactions{display:flex; gap:8px; flex-wrap:wrap;}
+  .scriptcard .sactions button{
+    flex:none; background:var(--surface3); border:1px solid var(--border); color:var(--text-dim);
+    border-radius:7px; padding:6px 11px; font-size:11.5px; font-weight:600; cursor:pointer;
+  }
+  .scriptcard .sactions button.copybtn{color:var(--green); border-color:rgba(62,207,142,0.35);}
+  .scriptcard .sactions button.editbtn{color:var(--amber); border-color:rgba(232,163,61,0.35);}
+  .scriptcard .sactions button.delbtn{color:var(--red); border-color:rgba(224,89,107,0.35);}
+  .scripteditform textarea{
+    width:100%; min-height:110px; background:var(--surface2); border:1px solid var(--border); border-radius:8px;
+    color:var(--text); padding:9px 10px; font-size:13px; font-family:var(--sans); resize:vertical; margin-top:6px;
+  }
+
   @media (max-width:420px){
     .subgrid{grid-template-columns:1fr;}
   }
@@ -280,6 +301,7 @@
     <button data-tab="mistakes">⚠️ Mistakes</button>
     <button data-tab="questions">❓ Questions</button>
     <button data-tab="followups">⏳ Follow-ups</button>
+    <button data-tab="scripts">📜 Scripts</button>
     <button data-tab="report">🧾 Report</button>
   </nav>
 </header>
@@ -424,6 +446,13 @@ async function loadFollowups(){
   catch(e){ return []; }
 }
 async function saveFollowups(list){ try{ await storageSet('followupsLog', JSON.stringify(list)); }catch(e){} }
+
+/* ---------------- Scripts library ---------------- */
+async function loadScripts(){
+  try{ const res = await storageGet('scriptsLib'); return res && res.value ? JSON.parse(res.value) : []; }
+  catch(e){ return []; }
+}
+async function saveScripts(list){ try{ await storageSet('scriptsLib', JSON.stringify(list)); }catch(e){} }
 
 /* ---------------- Autocomplete / word suggestions ---------------- */
 async function loadSuggestionsOnce(){
@@ -1017,6 +1046,67 @@ async function renderFollowups(){
   attachAutocomplete(document.getElementById('addFollowupText'), 'followup');
 }
 
+/* ---------------- Render: Scripts library ---------------- */
+async function renderScripts(){
+  if(!window.__scriptsCache) window.__scriptsCache = await loadScripts();
+  const list = window.__scriptsCache;
+  const filter = (window.__scriptsFilter || '').toLowerCase();
+  const filtered = filter
+    ? list.filter(s => s.topic.toLowerCase().includes(filter) || s.body.toLowerCase().includes(filter))
+    : list;
+
+  let html = `<div class="banner warn"><div class="ico">📜</div><div><b>Your script library</b>Ask Claude for a script in chat, then save the ones you like here under a topic. Next time, just search the topic to pull it up — no need to ask again.</div></div>`;
+
+  html += sectionOpen('Search scripts', list.length+' saved');
+  html += `<div class="card"><div class="addrow">
+    <input type="text" id="scriptSearchInput" placeholder="Type a topic or issue…" value="${escapeAttr(window.__scriptsFilter||'')}">
+    <button class="btn ghost small" data-action="clearScriptSearch">Clear</button>
+  </div></div>`;
+  html += sectionClose();
+
+  html += sectionOpen('Add a new script','');
+  html += `<div class="card"><div class="addrow" style="flex-direction:column; align-items:stretch;">
+    <input type="text" id="addScriptTopic" placeholder="Topic (e.g. Talixo - Flight Cancelled)">
+    <textarea id="addScriptBody" placeholder="Paste the script here…" style="min-height:100px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:9px 10px; font-size:13px; font-family:inherit; resize:vertical;"></textarea>
+    <button class="btn" data-action="addScript" style="align-self:flex-start;">💾 Save script</button>
+  </div></div>`;
+  html += sectionClose();
+
+  html += sectionOpen(filter ? `Results for "${escapeHtml(window.__scriptsFilter)}"` : 'All saved scripts', filtered.length+'');
+  html += '<div class="card">';
+  if(filtered.length===0){
+    html += `<div class="empty">${list.length===0 ? 'No scripts saved yet.' : 'No match for that topic.'}</div>`;
+  } else {
+    filtered.slice().reverse().forEach(s=>{
+      if(window.__editingScriptId === s.id){
+        html += `<div class="scriptcard scripteditform" data-id="${s.id}">
+          <input type="text" class="editTopic" value="${escapeAttr(s.topic)}" style="width:100%; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:9px 10px; font-size:13.5px;">
+          <textarea class="editBody">${escapeHtml(s.body)}</textarea>
+          <div class="sactions" style="margin-top:8px;">
+            <button class="copybtn" data-action="saveEditScript" data-id="${s.id}">Save changes</button>
+            <button data-action="cancelEditScript">Cancel</button>
+          </div>
+        </div>`;
+      } else {
+        html += `<div class="scriptcard" data-id="${s.id}">
+          <div class="stopic">${escapeHtml(s.topic)}</div>
+          <div class="sbody">${escapeHtml(s.body)}</div>
+          <div class="sactions">
+            <button class="copybtn" data-action="copyScript" data-id="${s.id}">📋 Copy</button>
+            <button class="editbtn" data-action="editScript" data-id="${s.id}">✎ Edit</button>
+            <button class="delbtn" data-action="delScript" data-id="${s.id}">🗑 Delete</button>
+          </div>
+        </div>`;
+      }
+    });
+  }
+  html += '</div>';
+  html += sectionClose();
+
+  document.getElementById('main').innerHTML = html;
+  attachAutocomplete(document.getElementById('addScriptTopic'), 'scriptTopic');
+}
+
 /* ---------------- Render: Report ---------------- */
 const DEFAULT_PARTNERS = [
   'Myairporttrips','Book Taxi London','Getcab Talixo','Air cabio','Mydaytrip','Mycab',
@@ -1407,6 +1497,7 @@ async function render(){
   else if(activeTab==='mistakes') await renderMistakes();
   else if(activeTab==='questions') await renderQuestions();
   else if(activeTab==='followups') await renderFollowups();
+  else if(activeTab==='scripts') await renderScripts();
   else if(activeTab==='report') await renderReport();
   refreshTabBadges();
 }
@@ -1677,6 +1768,63 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     return render();
   }
 
+  if(action==='addScript'){
+    const topicInput = document.getElementById('addScriptTopic');
+    const bodyInput = document.getElementById('addScriptBody');
+    if(!topicInput.value.trim() || !bodyInput.value.trim()) return;
+    recordSuggestion('scriptTopic', topicInput.value);
+    const list = await loadScripts();
+    list.push({id:uid(), topic:topicInput.value.trim(), body:bodyInput.value.trim(), ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
+    window.__scriptsCache = list;
+    await saveScripts(list);
+    return render();
+  }
+  if(action==='clearScriptSearch'){
+    window.__scriptsFilter = '';
+    return render();
+  }
+  if(action==='copyScript'){
+    const s = window.__scriptsCache.find(x=>x.id===el.dataset.id);
+    if(!s) return;
+    try{
+      await navigator.clipboard.writeText(s.body);
+      el.textContent = '✓ Copied';
+      setTimeout(()=>{ el.textContent = '📋 Copy'; }, 1200);
+    }catch(e){
+      alert(s.body); // fallback so the text is at least visible to copy manually
+    }
+    return;
+  }
+  if(action==='editScript'){
+    window.__editingScriptId = el.dataset.id;
+    return renderScripts();
+  }
+  if(action==='cancelEditScript'){
+    window.__editingScriptId = null;
+    return renderScripts();
+  }
+  if(action==='saveEditScript'){
+    const card = el.closest('.scriptcard');
+    const newTopic = card.querySelector('.editTopic').value.trim();
+    const newBody = card.querySelector('.editBody').value.trim();
+    if(!newTopic || !newBody) return;
+    const list = await loadScripts();
+    const s = list.find(x=>x.id===el.dataset.id);
+    if(s){ s.topic = newTopic; s.body = newBody; }
+    window.__scriptsCache = list;
+    window.__editingScriptId = null;
+    await saveScripts(list);
+    return renderScripts();
+  }
+  if(action==='delScript'){
+    if(!confirm('Delete this saved script?')) return;
+    let list = await loadScripts();
+    list = list.filter(x=>x.id!==el.dataset.id);
+    window.__scriptsCache = list;
+    await saveScripts(list);
+    return renderScripts();
+  }
+
   if(action==='addAcctRow'){
     document.getElementById('acctTable').insertAdjacentHTML('beforeend',
       `<div class="rowline"><div class="acct2"><input type="text" class="grow acctName" placeholder="Partner name"><input type="number" class="acctJobs" value="0" min="0"></div><button class="rmv" data-action="rmAcctRow">✕</button></div>`);
@@ -1743,6 +1891,19 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     notes = notes.filter(x=>!x.done);
     await saveNotes(notes);
     return render();
+  }
+});
+
+/* Live filter for the scripts search box */
+document.getElementById('main').addEventListener('input', (e)=>{
+  if(e.target.id === 'scriptSearchInput'){
+    window.__scriptsFilter = e.target.value;
+    renderScripts();
+    // keep focus + caret position after re-render
+    requestAnimationFrame(()=>{
+      const el = document.getElementById('scriptSearchInput');
+      if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    });
   }
 });
 
