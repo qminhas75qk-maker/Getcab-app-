@@ -1047,32 +1047,14 @@ async function renderFollowups(){
 }
 
 /* ---------------- Render: Scripts library ---------------- */
-async function renderScripts(){
-  if(!window.__scriptsCache) window.__scriptsCache = await loadScripts();
-  const list = window.__scriptsCache;
+function scriptResultsHTML(){
+  const list = window.__scriptsCache || [];
   const filter = (window.__scriptsFilter || '').toLowerCase();
   const filtered = filter
     ? list.filter(s => s.topic.toLowerCase().includes(filter) || s.body.toLowerCase().includes(filter))
     : list;
 
-  let html = `<div class="banner warn"><div class="ico">📜</div><div><b>Your script library</b>Ask Claude for a script in chat, then save the ones you like here under a topic. Next time, just search the topic to pull it up — no need to ask again.</div></div>`;
-
-  html += sectionOpen('Search scripts', list.length+' saved');
-  html += `<div class="card"><div class="addrow">
-    <input type="text" id="scriptSearchInput" placeholder="Type a topic or issue…" value="${escapeAttr(window.__scriptsFilter||'')}">
-    <button class="btn ghost small" data-action="clearScriptSearch">Clear</button>
-  </div></div>`;
-  html += sectionClose();
-
-  html += sectionOpen('Add a new script','');
-  html += `<div class="card"><div class="addrow" style="flex-direction:column; align-items:stretch;">
-    <input type="text" id="addScriptTopic" placeholder="Topic (e.g. Talixo - Flight Cancelled)">
-    <textarea id="addScriptBody" placeholder="Paste the script here…" style="min-height:100px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:9px 10px; font-size:13px; font-family:inherit; resize:vertical;"></textarea>
-    <button class="btn" data-action="addScript" style="align-self:flex-start;">💾 Save script</button>
-  </div></div>`;
-  html += sectionClose();
-
-  html += sectionOpen(filter ? `Results for "${escapeHtml(window.__scriptsFilter)}"` : 'All saved scripts', filtered.length+'');
+  let html = sectionOpen(filter ? `Results for "${escapeHtml(window.__scriptsFilter)}"` : 'All saved scripts', filtered.length+'');
   html += '<div class="card">';
   if(filtered.length===0){
     html += `<div class="empty">${list.length===0 ? 'No scripts saved yet.' : 'No match for that topic.'}</div>`;
@@ -1102,6 +1084,37 @@ async function renderScripts(){
   }
   html += '</div>';
   html += sectionClose();
+  return html;
+}
+
+function refreshScriptResultsOnly(){
+  const wrap = document.getElementById('scriptResultsWrap');
+  if(wrap){ wrap.innerHTML = scriptResultsHTML(); return true; }
+  return false;
+}
+
+async function renderScripts(){
+  if(!window.__scriptsCache) window.__scriptsCache = await loadScripts();
+  const list = window.__scriptsCache;
+
+  let html = `<div class="banner warn"><div class="ico">📜</div><div><b>Your script library</b>Ask Claude for a script in chat, then save the ones you like here under a topic. Next time, just search the topic to pull it up — no need to ask again.</div></div>`;
+
+  html += sectionOpen('Search scripts', list.length+' saved');
+  html += `<div class="card"><div class="addrow">
+    <input type="text" id="scriptSearchInput" placeholder="Type a topic or issue…" value="${escapeAttr(window.__scriptsFilter||'')}">
+    <button class="btn ghost small" data-action="clearScriptSearch">Clear</button>
+  </div></div>`;
+  html += sectionClose();
+
+  html += sectionOpen('Add a new script','');
+  html += `<div class="card"><div class="addrow" style="flex-direction:column; align-items:stretch;">
+    <input type="text" id="addScriptTopic" placeholder="Topic (e.g. Talixo - Flight Cancelled)">
+    <textarea id="addScriptBody" placeholder="Paste the script here…" style="min-height:100px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:9px 10px; font-size:13px; font-family:inherit; resize:vertical;"></textarea>
+    <button class="btn" data-action="addScript" style="align-self:flex-start;">💾 Save script</button>
+  </div></div>`;
+  html += sectionClose();
+
+  html += `<div id="scriptResultsWrap">${scriptResultsHTML()}</div>`;
 
   document.getElementById('main').innerHTML = html;
   attachAutocomplete(document.getElementById('addScriptTopic'), 'scriptTopic');
@@ -1781,7 +1794,10 @@ document.getElementById('main').addEventListener('click', async (e)=>{
   }
   if(action==='clearScriptSearch'){
     window.__scriptsFilter = '';
-    return render();
+    const input = document.getElementById('scriptSearchInput');
+    if(input) input.value = '';
+    if(!refreshScriptResultsOnly()) render();
+    return;
   }
   if(action==='copyScript'){
     const s = window.__scriptsCache.find(x=>x.id===el.dataset.id);
@@ -1797,11 +1813,13 @@ document.getElementById('main').addEventListener('click', async (e)=>{
   }
   if(action==='editScript'){
     window.__editingScriptId = el.dataset.id;
-    return renderScripts();
+    if(!refreshScriptResultsOnly()) return renderScripts();
+    return;
   }
   if(action==='cancelEditScript'){
     window.__editingScriptId = null;
-    return renderScripts();
+    if(!refreshScriptResultsOnly()) return renderScripts();
+    return;
   }
   if(action==='saveEditScript'){
     const card = el.closest('.scriptcard');
@@ -1814,7 +1832,8 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     window.__scriptsCache = list;
     window.__editingScriptId = null;
     await saveScripts(list);
-    return renderScripts();
+    if(!refreshScriptResultsOnly()) return renderScripts();
+    return;
   }
   if(action==='delScript'){
     if(!confirm('Delete this saved script?')) return;
@@ -1822,7 +1841,8 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     list = list.filter(x=>x.id!==el.dataset.id);
     window.__scriptsCache = list;
     await saveScripts(list);
-    return renderScripts();
+    if(!refreshScriptResultsOnly()) return renderScripts();
+    return;
   }
 
   if(action==='addAcctRow'){
@@ -1894,16 +1914,12 @@ document.getElementById('main').addEventListener('click', async (e)=>{
   }
 });
 
-/* Live filter for the scripts search box */
+/* Live filter for the scripts search box — updates only the results list,
+   never touches the input itself, so the mobile keyboard never flickers. */
 document.getElementById('main').addEventListener('input', (e)=>{
   if(e.target.id === 'scriptSearchInput'){
     window.__scriptsFilter = e.target.value;
-    renderScripts();
-    // keep focus + caret position after re-render
-    requestAnimationFrame(()=>{
-      const el = document.getElementById('scriptSearchInput');
-      if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-    });
+    refreshScriptResultsOnly();
   }
 });
 
