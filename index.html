@@ -12,6 +12,8 @@
 <title>GetCab — Shift Console</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --bg:#0d1117;
@@ -292,6 +294,7 @@
   <div class="opline">
     <span>Shift: <b>Evening / Night</b></span>
     <span>Status: <b id="statusLine">loading…</b></span>
+    <span id="syncBadge">⚪ Checking sync…</span>
   </div>
   <nav class="tabs" id="tabs">
     <button data-tab="today" class="active">📋 Today</button>
@@ -336,13 +339,70 @@ let state = {}; // in-memory cache of loaded day objects, keyed by date string
 let activeTab = 'today';
 
 /* ---------------- Storage layer ----------------
-   Uses window.storage when running inside Claude.ai (persists to your account).
-   Falls back to the browser's own localStorage when opened as a standalone
-   file (double-clicked / opened directly in Chrome, Safari, etc.) — this is
-   what makes data persist when you save this file and open it yourself. */
+   Three tiers, tried in order:
+   1. Firebase (if FIREBASE_CONFIG below is filled in) — real sync across every
+      device you open this page on (phone, laptop, anywhere).
+   2. window.storage — only present when running inside Claude.ai itself.
+   3. The browser's own localStorage — works, but is local to THIS device/browser
+      only. This is the fallback that was used before Firebase was set up.
+
+   ===== TO TURN ON CROSS-DEVICE SYNC =====
+   1. Go to https://console.firebase.google.com → Add project (free, no card needed).
+   2. In the project: Build → Firestore Database → Create database → Start in
+      "test mode" for now (we tighten the rule below in a moment).
+   3. Project settings (gear icon) → General → "Your apps" → click the </> (web)
+      icon → register an app (nickname anything) → copy the firebaseConfig object
+      it shows you → paste its values into FIREBASE_CONFIG below.
+   4. Pick your own private APP_KEY below (any random word/string only you know —
+      it keeps your data separate from anyone else who might ever use this same
+      Firebase project). Use the same APP_KEY on every device.
+   5. Back in Firestore → Rules tab, replace the rules with:
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /consoles/{appKey}/entries/{entry} {
+              allow read, write: if appKey == "PASTE_YOUR_APP_KEY_HERE";
+            }
+          }
+        }
+      (replace PASTE_YOUR_APP_KEY_HERE with your real APP_KEY, in quotes) → Publish.
+   6. Re-upload this file to GitHub Pages. Open it on both devices — they'll now
+      share the same data automatically, a few seconds after each change.
+   If you leave FIREBASE_CONFIG empty, the app works exactly as before (saves
+   locally to whichever device you're using, no sync). */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDi5z0cAn_CPivTR9O6lgxAQCc1jjxmZ0U",
+  authDomain: "shift-75.firebaseapp.com",
+  projectId: "shift-75",
+  storageBucket: "shift-75.firebasestorage.app",
+  messagingSenderId: "952822599874",
+  appId: "1:952822599874:web:38e80473aa87f1ef68ab5b"
+};
+const APP_KEY = "qasim-getcab"; // change this to any private word of your choosing
+
+let firestoreDB = null;
+let FIREBASE_READY = false;
+if(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId){
+  try{
+    firebase.initializeApp(FIREBASE_CONFIG);
+    firestoreDB = firebase.firestore();
+    FIREBASE_READY = true;
+  }catch(e){ console.error('Firebase init failed', e); FIREBASE_READY = false; }
+}
+
 const HAS_CLOUD_STORAGE = (typeof window.storage !== 'undefined' && window.storage && typeof window.storage.get === 'function');
 
+function firestoreDocRef(key){
+  return firestoreDB.collection('consoles').doc(APP_KEY).collection('entries').doc(encodeURIComponent(key));
+}
+
 async function storageGet(key){
+  if(FIREBASE_READY){
+    try{
+      const snap = await firestoreDocRef(key).get();
+      return snap.exists ? { key, value: snap.data().value } : null;
+    }catch(e){ console.error('Firestore read failed', e); return null; }
+  }
   if(HAS_CLOUD_STORAGE){
     try{ return await window.storage.get(key, false); }
     catch(e){ return null; }
@@ -353,6 +413,12 @@ async function storageGet(key){
   }catch(e){ return null; }
 }
 async function storageSet(key, value){
+  if(FIREBASE_READY){
+    try{
+      await firestoreDocRef(key).set({ value, updatedAt: Date.now() });
+      return { key, value };
+    }catch(e){ console.error('Firestore write failed', e); return null; }
+  }
   if(HAS_CLOUD_STORAGE){
     try{ return await window.storage.set(key, value, false); }
     catch(e){ return null; }
@@ -416,6 +482,7 @@ async function saveDay(key){
 }
 
 async function loadNotes(){
+  if(window.__notesCache) return window.__notesCache;
   try{
     const res = await storageGet('managerNotes');
     const notes = (res && res.value) ? JSON.parse(res.value) : [];
@@ -423,29 +490,39 @@ async function loadNotes(){
     return notes;
   }catch(e){ return []; }
 }
-async function saveNotes(notes){
+function saveNotes(notes){
   window.__notesCache = notes;
-  try{ await storageSet('managerNotes', JSON.stringify(notes)); }catch(e){}
+  try{ storageSet('managerNotes', JSON.stringify(notes)); }catch(e){}
 }
 
-/* ---------------- Persistent lists: Mistakes / Questions / Follow-ups ---------------- */
+/* ---------------- Persistent lists: Mistakes / Questions / Follow-ups ----------------
+   Cached in memory once loaded, same pattern as loadDay(), so re-rendering the Today tab
+   (which checks these for its reminder banners) doesn't hit the network every single time. */
+let mistakesCache = null, questionsCache = null, followupsCache = null;
+
 async function loadMistakes(){
-  try{ const res = await storageGet('mistakesLog'); return res && res.value ? JSON.parse(res.value) : []; }
-  catch(e){ return []; }
+  if(mistakesCache) return mistakesCache;
+  try{ const res = await storageGet('mistakesLog'); mistakesCache = res && res.value ? JSON.parse(res.value) : []; }
+  catch(e){ mistakesCache = []; }
+  return mistakesCache;
 }
-async function saveMistakes(list){ try{ await storageSet('mistakesLog', JSON.stringify(list)); }catch(e){} }
+function saveMistakes(list){ mistakesCache = list; try{ storageSet('mistakesLog', JSON.stringify(list)); }catch(e){} }
 
 async function loadQuestions(){
-  try{ const res = await storageGet('questionsLog'); return res && res.value ? JSON.parse(res.value) : []; }
-  catch(e){ return []; }
+  if(questionsCache) return questionsCache;
+  try{ const res = await storageGet('questionsLog'); questionsCache = res && res.value ? JSON.parse(res.value) : []; }
+  catch(e){ questionsCache = []; }
+  return questionsCache;
 }
-async function saveQuestions(list){ try{ await storageSet('questionsLog', JSON.stringify(list)); }catch(e){} }
+function saveQuestions(list){ questionsCache = list; try{ storageSet('questionsLog', JSON.stringify(list)); }catch(e){} }
 
 async function loadFollowups(){
-  try{ const res = await storageGet('followupsLog'); return res && res.value ? JSON.parse(res.value) : []; }
-  catch(e){ return []; }
+  if(followupsCache) return followupsCache;
+  try{ const res = await storageGet('followupsLog'); followupsCache = res && res.value ? JSON.parse(res.value) : []; }
+  catch(e){ followupsCache = []; }
+  return followupsCache;
 }
-async function saveFollowups(list){ try{ await storageSet('followupsLog', JSON.stringify(list)); }catch(e){} }
+function saveFollowups(list){ followupsCache = list; try{ storageSet('followupsLog', JSON.stringify(list)); }catch(e){} }
 
 /* ---------------- Scripts library ---------------- */
 async function loadScripts(){
@@ -888,7 +965,7 @@ window.__addNoteSync = async function(text){
   const notes = await loadNotes();
   notes.push({id:uid(), text, done:false, ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
   window.__notesCache = notes;
-  await saveNotes(notes);
+  saveNotes(notes);
   if(activeTab==='notes') render();
 };
 window.__updateNoteSync = async function(id, text, done){
@@ -896,14 +973,14 @@ window.__updateNoteSync = async function(id, text, done){
   const n = notes.find(x=>x.id===id);
   if(n){ n.text = text; n.done = done; }
   window.__notesCache = notes;
-  await saveNotes(notes);
+  saveNotes(notes);
   if(activeTab==='notes') render();
 };
 window.__deleteNoteSync = async function(id){
   let notes = await loadNotes();
   notes = notes.filter(x=>x.id!==id);
   window.__notesCache = notes;
-  await saveNotes(notes);
+  saveNotes(notes);
   if(activeTab==='notes') render();
 };
 
@@ -1539,6 +1616,14 @@ document.getElementById('tabs').addEventListener('click', e=>{
     try{ collectReportFromDOM(); }catch(err){}
   }
   activeTab = b.dataset.tab;
+  // Re-fetch from the cloud on every tab visit (not on every click within a tab) —
+  // this is what picks up anything changed on your other device since you last
+  // looked at this tab, while still keeping individual taps/edits instant.
+  if(FIREBASE_READY){
+    delete state[todayKey]; delete state[tomorrowKey]; delete state[yesterdayKey];
+    mistakesCache = null; questionsCache = null; followupsCache = null;
+    window.__notesCache = null; window.__scriptsCache = null;
+  }
   render();
 });
 
@@ -1556,7 +1641,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     const day = await loadDay(todayKey);
     const item = day.checklist.find(c=>c.id===el.dataset.id);
     item.done = !item.done;
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
 
@@ -1564,14 +1649,14 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     const day = await loadDay(todayKey);
     const acc = el.dataset.acc, part = el.dataset.part;
     day.emails[acc][part] = !day.emails[acc][part];
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
 
   if(action==='toggleJT'){
     const day = await loadDay(todayKey);
     day.jobtracking[el.dataset.part] = !day.jobtracking[el.dataset.part];
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
 
@@ -1580,14 +1665,14 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!input.value.trim()) return;
     const day = await loadDay(todayKey);
     day.calls.push({id:uid(), name:input.value.trim(), done:false});
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
   if(action==='toggleCall'){
     const day = await loadDay(todayKey);
     const call = day.calls.find(c=>c.id===el.dataset.id);
     call.done = !call.done;
-    await saveDay(todayKey);
+    saveDay(todayKey);
     await render();
     if(call.done){
       const allDone = day.calls.every(c=>c.done);
@@ -1600,7 +1685,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
   if(action==='delCall'){
     const day = await loadDay(todayKey);
     day.calls = day.calls.filter(c=>c.id!==el.dataset.id);
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
 
@@ -1609,20 +1694,20 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!input.value.trim()) return;
     const day = await loadDay(todayKey);
     day.noshows.push({id:uid(), ref:input.value.trim(), proof:false});
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
   if(action==='toggleNoShowProof'){
     const day = await loadDay(todayKey);
     const ns = day.noshows.find(n=>n.id===el.dataset.id);
     ns.proof = !ns.proof;
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
   if(action==='delNoShow'){
     const day = await loadDay(todayKey);
     day.noshows = day.noshows.filter(n=>n.id!==el.dataset.id);
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
 
@@ -1631,7 +1716,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!input.value.trim()) return;
     const day = await loadDay(todayKey);
     day.customTasks.push({id:uid(), text:input.value.trim(), done:false});
-    await saveDay(todayKey);
+    saveDay(todayKey);
     return render();
   }
   if(action==='toggleCustom'){
@@ -1639,14 +1724,14 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     const day = await loadDay(key);
     const c = day.customTasks.find(c=>c.id===el.dataset.id);
     c.done = !c.done;
-    await saveDay(key);
+    saveDay(key);
     return render();
   }
   if(action==='delCustom'){
     const key = el.dataset.scope==='today'?todayKey:tomorrowKey;
     const day = await loadDay(key);
     day.customTasks = day.customTasks.filter(c=>c.id!==el.dataset.id);
-    await saveDay(key);
+    saveDay(key);
     return render();
   }
 
@@ -1662,20 +1747,20 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!input.value.trim()) return;
     const day = await loadDay(tomorrowKey);
     day.tomorrowLog.push({id:uid(), text:input.value.trim(), source: window.__pickedSource||'gmail', done:false});
-    await saveDay(tomorrowKey);
+    saveDay(tomorrowKey);
     return render();
   }
   if(action==='toggleTomorrowLog'){
     const day = await loadDay(tomorrowKey);
     const l = day.tomorrowLog.find(x=>x.id===el.dataset.id);
     l.done = !l.done;
-    await saveDay(tomorrowKey);
+    saveDay(tomorrowKey);
     return render();
   }
   if(action==='delTomorrowLog'){
     const day = await loadDay(tomorrowKey);
     day.tomorrowLog = day.tomorrowLog.filter(x=>x.id!==el.dataset.id);
-    await saveDay(tomorrowKey);
+    saveDay(tomorrowKey);
     return render();
   }
   if(action==='toggleTomorrowReview'){
@@ -1683,7 +1768,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!isTodayFullyDone(today)) return;
     const day = await loadDay(tomorrowKey);
     day.jobtracking.reviewed = !day.jobtracking.reviewed;
-    await saveDay(tomorrowKey);
+    saveDay(tomorrowKey);
     return render();
   }
 
@@ -1692,20 +1777,20 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(!input.value.trim()) return;
     const notes = await loadNotes();
     notes.push({id:uid(), text:input.value.trim(), done:false, ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
-    await saveNotes(notes);
+    saveNotes(notes);
     return render();
   }
   if(action==='toggleNote'){
     const notes = await loadNotes();
     const n = notes.find(x=>x.id===el.dataset.id);
     n.done = !n.done;
-    await saveNotes(notes);
+    saveNotes(notes);
     return render();
   }
   if(action==='delNote'){
     let notes = await loadNotes();
     notes = notes.filter(x=>x.id!==el.dataset.id);
-    await saveNotes(notes);
+    saveNotes(notes);
     return render();
   }
   if(action==='openNotesWindow'){
@@ -1718,13 +1803,13 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     recordSuggestion('mistake', input.value);
     const list = await loadMistakes();
     list.push({id:uid(), text:input.value.trim(), ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
-    await saveMistakes(list);
+    saveMistakes(list);
     return render();
   }
   if(action==='delMistake'){
     let list = await loadMistakes();
     list = list.filter(m=>m.id!==el.dataset.id);
-    await saveMistakes(list);
+    saveMistakes(list);
     return render();
   }
 
@@ -1734,20 +1819,20 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     recordSuggestion('question', input.value);
     const list = await loadQuestions();
     list.push({id:uid(), text:input.value.trim(), done:false, ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
-    await saveQuestions(list);
+    saveQuestions(list);
     return render();
   }
   if(action==='toggleQuestion'){
     const list = await loadQuestions();
     const q = list.find(x=>x.id===el.dataset.id);
     q.done = !q.done;
-    await saveQuestions(list);
+    saveQuestions(list);
     return render();
   }
   if(action==='delQuestion'){
     let list = await loadQuestions();
     list = list.filter(x=>x.id!==el.dataset.id);
-    await saveQuestions(list);
+    saveQuestions(list);
     return render();
   }
 
@@ -1764,20 +1849,20 @@ document.getElementById('main').addEventListener('click', async (e)=>{
       needsApproval: approvalChk.checked, done:false,
       ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})
     });
-    await saveFollowups(list);
+    saveFollowups(list);
     return render();
   }
   if(action==='toggleFollowup'){
     const list = await loadFollowups();
     const f = list.find(x=>x.id===el.dataset.id);
     f.done = !f.done;
-    await saveFollowups(list);
+    saveFollowups(list);
     return render();
   }
   if(action==='delFollowup'){
     let list = await loadFollowups();
     list = list.filter(x=>x.id!==el.dataset.id);
-    await saveFollowups(list);
+    saveFollowups(list);
     return render();
   }
 
@@ -1789,7 +1874,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     const list = await loadScripts();
     list.push({id:uid(), topic:topicInput.value.trim(), body:bodyInput.value.trim(), ts:new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})});
     window.__scriptsCache = list;
-    await saveScripts(list);
+    saveScripts(list);
     return render();
   }
   if(action==='clearScriptSearch'){
@@ -1831,7 +1916,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     if(s){ s.topic = newTopic; s.body = newBody; }
     window.__scriptsCache = list;
     window.__editingScriptId = null;
-    await saveScripts(list);
+    saveScripts(list);
     if(!refreshScriptResultsOnly()) return renderScripts();
     return;
   }
@@ -1840,7 +1925,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
     let list = await loadScripts();
     list = list.filter(x=>x.id!==el.dataset.id);
     window.__scriptsCache = list;
-    await saveScripts(list);
+    saveScripts(list);
     if(!refreshScriptResultsOnly()) return renderScripts();
     return;
   }
@@ -1909,7 +1994,7 @@ document.getElementById('main').addEventListener('click', async (e)=>{
   if(action==='clearNotesDone'){
     let notes = await loadNotes();
     notes = notes.filter(x=>!x.done);
-    await saveNotes(notes);
+    saveNotes(notes);
     return render();
   }
 });
@@ -1952,10 +2037,26 @@ function askImportantNote(){
   }
 }
 
+function updateSyncBadge(){
+  const el = document.getElementById('syncBadge');
+  if(!el) return;
+  if(FIREBASE_READY){
+    el.textContent = '☁️ Synced across devices';
+    el.style.color = 'var(--green)';
+  } else if(HAS_CLOUD_STORAGE){
+    el.textContent = '☁️ Synced via Claude.ai';
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = '⚠️ This device only — Firebase not set up';
+    el.style.color = 'var(--amber)';
+  }
+}
+
 /* ---------------- Init ---------------- */
 loadSuggestionsOnce();
 tickClock();
 render();
+updateSyncBadge();
 setInterval(refreshTabBadges, 60000); // keep "due now" badges live even without navigation
 
 if('serviceWorker' in navigator){
