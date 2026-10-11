@@ -378,7 +378,7 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "952822599874",
   appId: "1:952822599874:web:38e80473aa87f1ef68ab5b"
 };
-const APP_KEY = "qasim-getcab"; // change this to any private word of your choosing
+const APP_KEY = "qasim-270c437ef23114f13147b58f"; // private — do not share this file/value with anyone else
 
 let firestoreDB = null;
 let FIREBASE_READY = false;
@@ -1616,15 +1616,25 @@ document.getElementById('tabs').addEventListener('click', e=>{
     try{ collectReportFromDOM(); }catch(err){}
   }
   activeTab = b.dataset.tab;
-  // Re-fetch from the cloud on every tab visit (not on every click within a tab) —
-  // this is what picks up anything changed on your other device since you last
-  // looked at this tab, while still keeping individual taps/edits instant.
-  if(FIREBASE_READY){
-    delete state[todayKey]; delete state[tomorrowKey]; delete state[yesterdayKey];
-    mistakesCache = null; questionsCache = null; followupsCache = null;
-    window.__notesCache = null; window.__scriptsCache = null;
-  }
+  render(); // instant — always uses whatever's already in memory, never waits on the network
+});
+
+// Cross-device freshness happens here instead: a quiet background refresh, not tied to
+// clicking, so it can never block a tap or race against a save that's still in flight.
+// Runs periodically, and immediately whenever you come back to the app (switch back from
+// another app, wake your laptop, etc.) — the Report tab is skipped so it never overwrites
+// text you're mid-way through editing there.
+async function backgroundRefresh(){
+  if(!FIREBASE_READY) return;
+  if(activeTab === 'report') return;
+  delete state[todayKey]; delete state[tomorrowKey]; delete state[yesterdayKey];
+  mistakesCache = null; questionsCache = null; followupsCache = null;
+  window.__notesCache = null; window.__scriptsCache = null;
   render();
+}
+setInterval(backgroundRefresh, 30000);
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible') backgroundRefresh();
 });
 
 /* ---------------- Event delegation for main content ---------------- */
